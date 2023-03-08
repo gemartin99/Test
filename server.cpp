@@ -1,9 +1,16 @@
 #include <iostream>
 #include <cstring>
-#include <unistd.h>
+#include <cstdlib>
+#include <cerrno>
+#include <arpa/inet.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
+#include <unistd.h>
+#include <sys/poll.h>
+#include <vector>
+
+#define MAX_CLIENTS 126
 
 static bool is_digits(const std::string &str)
 {
@@ -13,16 +20,7 @@ static bool is_digits(const std::string &str)
 void write_error(const char *s)
 {
     std::cerr << s << std::endl;
-    exit (1);
-}
-
-void    response_client(const char *s, int client_socket)
-{
-    ssize_t bytes_sent = send(client_socket, s, std::strlen(s), 0);
-    if (bytes_sent < 0)
-        write_error("Error sending");
-    else
-        std::cout << s; //en verdad no cunde imprimir esto
+    exit (EXIT_FAILURE);
 }
 
 int main(int argc, char **argv) 
@@ -32,62 +30,97 @@ int main(int argc, char **argv)
     int port = atoi(argv[1]);
     if (!is_digits(argv[1]) || port > 65535 || port < 1)
         write_error("Invalid port");
-    /*if (strlen(argv[2]) < 7) //hacer parsing de contraseña en el futuro
-        write_error("Insecure password");*/
-    int server_socket = socket(AF_INET, SOCK_STREAM, 0); //socket(int domain, int type, int protocol)
-    if (server_socket < 0)
-        write_error("Error opening");
+    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket == -1)
+        write_error("Error creating socket");
 
-    struct sockaddr_in server_address;
-    std::memset(&server_address, 0, sizeof(server_address));
-    server_address.sin_family = AF_INET; //para direcciones lPv4.
-    //server_address.sin_addr.s_addr = htonl(INADDR_ANY); //direccion ip de la direccion del socket en formato de bytes de red
-    server_address.sin_addr.s_addr = inet_addr("10.11.8.4");
-    server_address.sin_port = htons(port); //puerto de la direccion del socket en formato bytes de red
+    struct sockaddr_in server_address = {0};
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY;
+    server_address.sin_port = htons(port);
 
-    if (bind(server_socket, (struct sockaddr*) &server_address, sizeof(server_address)) < 0) //asocia el numero de puerto y la IP con el socket.
-        write_error("Error binding");
+    if (bind(server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) == -1)
+        write_error("Error binding"); //error al asociar el socket a la direccion del servidor
 
-    if (listen(server_socket, 5) < 0) //modificar el 5 a las conexiones permitidas que nos interese
-        write_error("Error listening");
+    if (listen(server_socket, MAX_CLIENTS) == -1)
+        write_error("Error listening"); //error al escuchar conexiones entrantes
 
-    std::cout << "Listening on port " << port << std::endl; //poner var en un futuro y no escribir a mano el puerto
+    // declaracion estructura de eventos para la funcion poll
+    struct pollfd fd_array[MAX_CLIENTS + 1];
 
-    while (1) //se queda en escucha a la espera de que el cliente se conecte
+    // configuracion del evento para el socket del servidor
+    fd_array[0].fd = server_socket;
+    fd_array[0].events = POLLIN;
+
+    //numero de eventos en la estructura
+    int num_fds = 1;
+
+    std::vector<int> vec_clients;
+    std::cout << "Listening on port " << port << std::endl;
+    // bucle a la espera de conexiones entrantes y manejarlas
+    while (true)
     {
-        //⚠️ IMPORTANTE HACER ARRAY DE CLIENT SOCKETS ⚠️
-        int client_socket = accept(server_socket, nullptr, nullptr);
-        if (client_socket < 0)
-        {
-            std::cerr << "Error accepting client connection" << std::endl;;
-            continue; //saltamos el resto de iteracion del bucle y volvemos a entrar
-        }
+        int num_events = poll(fd_array, num_fds, -1);
 
-        std::cout << "Accepted client connection" << std::endl;
-
-        while (1) //se queda en escucha infinita a la espera de nuevos mensajes. MODIFICAR PARA EL FUTURO que coja mensajes hasta que le llegue \r\n y cuando le llegue pasar todos los mensajes al parsing
+        if (num_events == -1)
+            write_error("Error poll");
+        for (int i = 0; i < num_fds; i++)
         {
-            char buffer[1024];
-            std::memset(buffer, 0, sizeof(buffer));
-            ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-            if (bytes_received < 0)
+            if (fd_array[i].revents == 0)
+                continue;
+
+            // check nueva conexion
+            if (fd_array[i].fd == server_socket)
             {
-                std::cerr << "Error receiving data from client" << std::endl;
-                break;
+                int client_fd = accept(server_socket, nullptr, nullptr);
+                if (client_fd == -1)
+                {
+                    std::cerr << "Error accepting incoming connection" << std::endl;
+                    continue;
+                }
+                vec_clients.push_back(client_fd);
+                // configurar el evento para el nuevo cliente
+                fd_array[num_fds].fd = client_fd;
+                fd_array[num_fds].events = POLLIN;
+                num_fds++;
+
+                std::string welcome_msg = "Bienvenido al servidor IRC\n";
+                send(client_fd, welcome_msg.c_str(), welcome_msg.length(), 0);
+
+                std::cout << "New client FD = " << client_fd << std::endl;
             }
-            else if (bytes_received == 0)
+            else 
             {
-                std::cout << "Client disconnected" << std::endl;
-                break;
+                char buffer[512];
+                memset(buffer, 0, sizeof(buffer));
+                int bytes_received = recv(fd_array[i].fd, buffer, sizeof(buffer), 0);
+
+                if (bytes_received == -1) 
+                {
+                    std::cerr << "Error receiving customer data FD = " << fd_array[i].fd << std::endl;
+                    continue;
+                }
+
+                if (bytes_received == 0) //si un cliente se desconecta se cierra su socket, se elimina del vector y se elimina el evento de la estructura
+                {
+                    vec_clients.erase(std::remove(vec_clients.begin(), vec_clients.end(), fd_array[i].fd), vec_clients.end());
+                    std::cout << "Client disconnected FD = " << fd_array[i].fd << std::endl;
+                    close(fd_array[i].fd);
+                    for (int j = i; j < num_fds; j++)
+                    {
+                        fd_array[j].fd = fd_array[j + 1].fd;
+                        fd_array[j].events = fd_array[j + 1].events;
+                    }
+                    num_fds--;
+                }
+                else
+                {
+                    std::cout << buffer;
+                    //send(fd_array[i].fd, buffer, bytes_received, 0);
+                }
             }
-            else
-            {
-                std::cout << buffer;// << std::endl;
-                //std::cout << "Received " << bytes_received << " bytes: " << buffer << std::endl;
-            }
-            const char *responde_msg = "Mensaje recibido caranalga!"; //"Hello, client!";
-            response_client(responde_msg, client_socket); //funcion para devolver el mensaje al cliente. La respuesta se hace cada vez que el cliente mande algo.
         }
     }
+    close(server_socket);
+    return 0;
 }
-
