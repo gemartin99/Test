@@ -10,7 +10,7 @@
 #include <sys/poll.h>
 #include <vector>
 
-#define MAX_CLIENTS 126
+#define MAX_CLIENTS 128
 
 static bool is_digits(const std::string &str)
 {
@@ -52,7 +52,6 @@ int main(int argc, char **argv)
     fd_array[0].fd = server_socket;
     fd_array[0].events = POLLIN;
 
-    //numero de eventos en la estructura
     int num_fds = 1;
 
     std::vector<int> vec_clients;
@@ -64,6 +63,7 @@ int main(int argc, char **argv)
 
         if (num_events == -1)
             write_error("Error poll");
+
         for (int i = 0; i < num_fds; i++)
         {
             if (fd_array[i].revents == 0)
@@ -76,6 +76,14 @@ int main(int argc, char **argv)
                 if (client_fd == -1)
                 {
                     std::cerr << "Error accepting incoming connection" << std::endl;
+                    continue;
+                }
+                std::cout << client_fd << MAX_CLIENTS << std::endl;
+                if (num_fds == MAX_CLIENTS)
+                {
+                    std::string welcome_msg = "The server is full. Please try again later.\n";
+                    send(client_fd, welcome_msg.c_str(), welcome_msg.length(), 0);
+                    close(client_fd);
                     continue;
                 }
                 vec_clients.push_back(client_fd);
